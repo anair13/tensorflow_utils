@@ -1,7 +1,11 @@
 from os import path as osp
 import other_utils as ou
 import tensorflow as tf
+from easydict import EasyDict as edict
+import time
 
+##
+#Get weights
 def get_weights(shape, stddev=0.1, name='w', wd=None, lossCollection='losses'):
   '''
     stddev: stddev of init
@@ -16,10 +20,14 @@ def get_weights(shape, stddev=0.1, name='w', wd=None, lossCollection='losses'):
     tf.add_to_collection(lossCollection, weightDecay)
   return w
 
+##
+#Get bias
 def get_bias(shape, name='b'):
   b = tf.constant(0.1, shape=shape)
   return tf.Variable(b, name=name)
 
+##
+#L1 loss
 def l1_loss(tensor, weight=1.0, scope=None):
   """Define a L1Loss, useful for regularize, i.e. lasso.
   Args:
@@ -36,11 +44,14 @@ def l1_loss(tensor, weight=1.0, scope=None):
     loss = tf.mul(weight, tf.reduce_sum(tf.abs(tensor)), name='value')
     return loss 
 
+##
+#Not implemented
 def l2_loss(err, name=None):
   with tf.scope('L2Loss') as scope:
     pass
 
-
+##
+#Apply batch norm to a layer
 def apply_batch_norm( x, scopeName, movingAvgFraction=0.999,
        scale=False, phase='train'):
   assert phase in ['train', 'test']
@@ -70,7 +81,8 @@ def apply_batch_norm( x, scopeName, movingAvgFraction=0.999,
     return tf.nn.batch_normalization(x, mean, var,
         beta, gamma, 1e-5, scale)
 
-
+##
+#Helper class for constructing networks
 class TFNet(object):
   def __init__(self, modelName=None, logDir='tf_logs/',
           modelDir='tf_models/'):
@@ -79,6 +91,11 @@ class TFNet(object):
     self.modelName_      = modelName
     self.logDir_         = logDir
     self.modelDir_       = modelDir
+    if modelName is not None:
+      self.logDir_   = osp.join(self.logDir_, modelName)
+      self.modelDir_ = osp.join(self.modelDir_, modelName)
+    ou.mkdir(self.logDir_)
+    ou.mkdir(self.modelDir_) 
     self.summaryWriter_  = None
 
   def get_weights(self, scopeName, shape, stddev=0.005, wd=None):
@@ -134,35 +151,6 @@ class TFNet(object):
              b, name=scopeName)
     return conv
 
-  def add_batch_norm(self, x, scope, movingAvgFraction=0.999, scale=False):
-    shp = ip.get_shape()
-    if len(shp)==2:
-      nOp = shp[1]
-    else:
-      assert len(shp) == 4
-      nOp = shp[3]
-    with tf.variable_scope(scope):
-      beta = tf.Variable(tf.constant(0.0, shape=[nOp]),
-          name='beta', trainable=True)
-      gamma = tf.Variable(tf.constant(1.0, shape=[nOp]),
-          name='gamma', trainable=scale)
-      #Compute the mean and variance of batch
-      batch_mean, batch_var = tf.nn.moments(x, [0,1,2], name='moments')
-      #Compute the moving average of mean and variance
-      ema = tf.train.ExponentialMovingAverage(decay=movingAvgFraction)
-      ema_apply_op = ema.apply([batch_mean, batch_var])
-      ema_mean, ema_var = ema.average(batch_mean), ema.average(batch_var)
-      def mean_var_with_update():
-          with tf.control_dependencies([ema_apply_op]):
-              return tf.identity(batch_mean), tf.identity(batch_var)
-      mean, var = control_flow_ops.cond(phase_train,
-          mean_var_with_update,
-          lambda: (ema_mean, ema_var))
-
-      normed = tf.nn.batch_norm_with_global_normalization(x, mean, var,
-          beta, gamma, 1e-5, affine)
-    return normed 
-
   def add_to_losses(self, loss):
     tf.add_to_collection(self.lossCollection_, loss) 
 
@@ -191,7 +179,10 @@ class TFNet(object):
       if grad is not None:
         tf.histogram_summary(var.op.name + '/gradients', grad)
 
+  ##
+  #Start the logging of loss, gradients and parameters
   def init_logging(self, grads=None):
+    
     self.add_loss_summaries()
     self.add_param_summaries()
     self.add_grad_summaries(grads)
@@ -221,3 +212,132 @@ class TFNet(object):
     svPath = osp.join(self.modelDir_, 'model') 
     ou.mkdir(svPath) 
     self.saver_.save(sess, svPath, global_step=step)
+
+
+##
+#Helper class for easily training TFNets
+class TFTrain(object):
+  def __init__(self, tfNet, solverType='adam', initLr=1e-3, 
+        maxIter=100000, dispIter=1000, logIter=1000, batchSz=128):
+    #net to be trained
+    self.tfNet_    = tfNet
+    self.maxIter_  = maxIter
+    self.dispIter_ = dispIter 
+    self.logIter_  = logIter
+    self.batchSz_  = batchSz
+ 
+    #initialize the step
+    self.iter_  = tf.Variable(0, name='iteration')
+  
+    #define the solver
+    if solverType == 'adam':
+      self.opt_ = tf.train.AdamOptimizer(initLr)
+    else:
+      raise Exception('Solver not recognized')
+  
+    #the loss to be optimized
+    self.loss_  = tfNet.get_total_loss()
+
+    #gradient computation
+    self.grads_ = self.opt_.compute_gradients(self.loss_)
+    apply_gradient_op = opt.apply_gradients(self.grads, global_step=self.iter_)
+    with tf.control_dependencies([apply_gradient_op]):
+      self.train_op_ = tf.no_op(name='train')
+
+    #init logging of gradients
+    tfNet.init_logging(self.grads_)
+    
+    #keep track of time in training the net
+    self.trTime_ = 0
+
+  ##
+  #
+  def reset_train_time(self):
+    self.trTime_ = 0
+
+  ##
+  #add the training accuracy/loss measure
+  def add_loss_summaries(self, lossOps, lossNames=None):
+    '''
+     lossOps: the operator that stores which accuracies/losses
+             need to logged 
+    '''
+    if not type(lossOps) == list:
+      lossOps   = [lossOps]
+    if lossNames is None:
+      lossNames = ['smmry_%s' % l.name for l in lossOps]
+    self.lossSmmry_ = edict()
+    self.lossSmmry_['train'] = []
+    self.lossSmmry_['val']   = []
+    self.lossNames_['train'] = []
+    self.lossNames_['val']   = []
+    for l, n in zip(lossOps, lossNames):
+      for tv in ['train', 'val']:
+        #Train/Val summaries should not be merged with the other summaries
+        name = '%s_%s' % (tv, n)
+        self.lossNames_[tv].append(name)
+        self.lossSmmry_[tv].append(tf.scalar_summary(name, l))
+    self.lossOps_ = lossOps 
+
+  ##
+  #step the network by 1
+  def step_by_1(self, feed_dict, evalOps=[], isTrain=True):
+    '''
+      feed_dict: the input to the net
+      evalOps  : the operators to be evaluated
+    '''
+    tSt = time.time()
+    assert type(opNames) == list
+    if isTrain:
+      ops = sess.run([self.train_op_, self.loss_] +  evalOps, feed_dict=feed_dict)
+      ops = ops[1:]
+    else:
+      ops = sess.run([self.loss_] +  evalOps, feed_dict=feed_dict)
+    self.trTime_ += (time.time() - tSt)
+    return ops
+  
+  def get_display_str(self):
+    print ('Step: %d, 1000 batches took: %f, pred_loss: %f, total_loss %f' %\
+             (sess.run(stepNum),  deltaT, predLoss, lossVal))
+ 
+  ##
+  #train the net 
+  def train(self, train_data_fn, val_data_fn, trainArgs=None, valArgs=None):
+    '''
+      train_data_fn: returns feed_dict for train data
+      val_data_fn  : returns feed_dict for val data
+    '''
+    with tf.Session() as sess:
+      sess.run(tf.initialize_all_variables())
+      self.reset_train_time()
+      
+      #Start the iterations
+      for i in range(self.maxIter_):
+        #Fetch the training data
+        trainDat = train_data_fn(self.batchSz_, trainArgs)
+
+        if np.mod(i, self.logIter_)==0:
+          #evaluate the training losses and summaries
+          N       = len(self.lossOps_)
+          evalOps = self.lossOps_ + self.lossSmmry_['train'] + [self.tfNet_.summaryOp_]
+          res     = self.step_by_1(trainDat, evalOps = evalOps)
+          ovLoss   = res[0]
+          trainLosses = res[1:N+1]          
+          #Save the summaries
+          self.tfNet_.save_summary(res[N+1:], sess, i)
+          #snapshot the model
+          self.tfNet_.save_model(sess, i)
+      
+          #evaluate the validation losses and summaries 
+          valDat  = train_data_fn(self.batchSz_, valArgs)
+          evalOps = self.lossOps_ + self.lossSmmry_['val']
+          res     = self.step_by_1(valDat, evalOps = evalOps, isTrain=False)
+          ovValLoss = res[0]
+          valLosses = res[1:N+1]          
+          #Save the val summaries
+          self.tfNet_.save_summary(res[N+1:], sess, i)
+        else: 
+          ops    = self.step_by_1(trainDat)
+          ovLoss = ops[0]
+        assert not np.isnan(ovLoss), 'Model diverged, NaN loss'
+        assert not np.isinf(ovLoss), 'Model diverged, inf loss'
