@@ -3,6 +3,7 @@ import other_utils as ou
 import tensorflow as tf
 from easydict import EasyDict as edict
 import time
+import numpy as np
 
 ##
 #Get weights
@@ -217,8 +218,11 @@ class TFNet(object):
 ##
 #Helper class for easily training TFNets
 class TFTrain(object):
-  def __init__(self, tfNet, solverType='adam', initLr=1e-3, 
+  def __init__(self, ipVar, tfNet, solverType='adam', initLr=1e-3, 
         maxIter=100000, dispIter=1000, logIter=1000, batchSz=128):
+    #input variables
+    assert type(ipVar) is list
+    self.ips_ = ipVar
     #net to be trained
     self.tfNet_    = tfNet
     self.maxIter_  = maxIter
@@ -240,7 +244,7 @@ class TFTrain(object):
 
     #gradient computation
     self.grads_ = self.opt_.compute_gradients(self.loss_)
-    apply_gradient_op = opt.apply_gradients(self.grads, global_step=self.iter_)
+    apply_gradient_op = self.opt_.apply_gradients(self.grads_, global_step=self.iter_)
     with tf.control_dependencies([apply_gradient_op]):
       self.train_op_ = tf.no_op(name='train')
 
@@ -267,6 +271,7 @@ class TFTrain(object):
     if lossNames is None:
       lossNames = ['smmry_%s' % l.name for l in lossOps]
     self.lossSmmry_ = edict()
+    self.lossNames_ = edict()
     self.lossSmmry_['train'] = []
     self.lossSmmry_['val']   = []
     self.lossNames_['train'] = []
@@ -281,13 +286,13 @@ class TFTrain(object):
 
   ##
   #step the network by 1
-  def step_by_1(self, feed_dict, evalOps=[], isTrain=True):
+  def step_by_1(self, sess, feed_dict, evalOps=[], isTrain=True):
     '''
       feed_dict: the input to the net
       evalOps  : the operators to be evaluated
     '''
     tSt = time.time()
-    assert type(opNames) == list
+    assert type(evalOps) == list
     if isTrain:
       ops = sess.run([self.train_op_, self.loss_] +  evalOps, feed_dict=feed_dict)
       ops = ops[1:]
@@ -296,13 +301,22 @@ class TFTrain(object):
     self.trTime_ += (time.time() - tSt)
     return ops
   
-  def get_display_str(self):
-    print ('Step: %d, 1000 batches took: %f, pred_loss: %f, total_loss %f' %\
-             (sess.run(stepNum),  deltaT, predLoss, lossVal))
+  def print_display_str(self, step, lossNames, losses, isTrain=True):
+    if not list(losses):
+      losses = [losses]
+      lossNames = [lossNames]
+    if isTrain:
+      T = self.trTime_
+      self.reset_train_time()
+      lossStr = 'Iter: %d, time for %d iters: %f \n ' % (step, self.dispIter_, T)
+    else:
+      lossStr = ''
+    lossStr = lossStr + ''.join('%s: %.3f\t' % (n, l) for n,l in zip(lossNames, losses))
+    print (lossStr)
  
   ##
   #train the net 
-  def train(self, train_data_fn, val_data_fn, trainArgs=None, valArgs=None):
+  def train(self, train_data_fn, val_data_fn, trainArgs=[], valArgs=[]):
     '''
       train_data_fn: returns feed_dict for train data
       val_data_fn  : returns feed_dict for val data
@@ -314,30 +328,32 @@ class TFTrain(object):
       #Start the iterations
       for i in range(self.maxIter_):
         #Fetch the training data
-        trainDat = train_data_fn(self.batchSz_, trainArgs)
+        trainDat = train_data_fn(self.ips_, self.batchSz_, *trainArgs)
 
         if np.mod(i, self.logIter_)==0:
           #evaluate the training losses and summaries
           N       = len(self.lossOps_)
           evalOps = self.lossOps_ + self.lossSmmry_['train'] + [self.tfNet_.summaryOp_]
-          res     = self.step_by_1(trainDat, evalOps = evalOps)
+          res     = self.step_by_1(sess, trainDat, evalOps = evalOps)
           ovLoss   = res[0]
           trainLosses = res[1:N+1]          
           #Save the summaries
           self.tfNet_.save_summary(res[N+1:], sess, i)
           #snapshot the model
           self.tfNet_.save_model(sess, i)
-      
+          self.print_display_str(i, self.lossNames_['train'], trainLosses)     
+ 
           #evaluate the validation losses and summaries 
-          valDat  = train_data_fn(self.batchSz_, valArgs)
+          valDat  = val_data_fn(self.ips_, self.batchSz_, *valArgs)
           evalOps = self.lossOps_ + self.lossSmmry_['val']
-          res     = self.step_by_1(valDat, evalOps = evalOps, isTrain=False)
+          res     = self.step_by_1(sess, valDat, evalOps = evalOps, isTrain=False)
           ovValLoss = res[0]
           valLosses = res[1:N+1]          
           #Save the val summaries
           self.tfNet_.save_summary(res[N+1:], sess, i)
+          self.print_display_str(i, self.lossNames_['val'], valLosses, False)     
         else: 
-          ops    = self.step_by_1(trainDat)
+          ops    = self.step_by_1(sess, trainDat)
           ovLoss = ops[0]
         assert not np.isnan(ovLoss), 'Model diverged, NaN loss'
         assert not np.isinf(ovLoss), 'Model diverged, inf loss'
