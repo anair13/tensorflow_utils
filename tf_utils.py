@@ -5,6 +5,7 @@ import tensorflow as tf
 from easydict import EasyDict as edict
 import time
 import numpy as np
+import subprocess
 #for reading summary files
 from tensorflow.python.summary import event_accumulator as ea
 
@@ -149,6 +150,12 @@ class TFNet(object):
   def get_log_name(self):
     fNames = [osp.join(self.logDir_, f) for f in  os.listdir(self.logDir_)]
     return fNames
+
+  def clear_old_logs(self):
+   fNames = self.get_log_name()
+   for f in fNames:
+    print ('Deleting: %s' % f)
+    subprocess.check_call(['rm %s' % f], shell=True) 
 
   def get_weights(self, scopeName, shape, stddev=0.005, wd=None):
     '''
@@ -458,7 +465,7 @@ class TFTrain(TFMain):
       #Start the iterations
       for i in range(self.maxIter_):
         #Fetch the training data
-        trainDat = train_data_fn(self.ips_, self.batchSz_, *trainArgs)
+        trainDat = train_data_fn(self.ips_, self.batchSz_, True, *trainArgs)
 
         if np.mod(i, self.logIter_)==0:
           #evaluate the training losses and summaries
@@ -474,7 +481,7 @@ class TFTrain(TFMain):
           self.print_display_str(i, self.lossNames_['train'], trainLosses)     
  
           #evaluate the validation losses and summaries 
-          valDat  = val_data_fn(self.ips_, self.batchSz_, *valArgs)
+          valDat  = val_data_fn(self.ips_, self.batchSz_, False, *valArgs)
           evalOps = self.lossOps_ + self.lossSmmry_['val']
           res     = self.step_by_1(sess, valDat, evalOps = evalOps, isTrain=False)
           ovValLoss = res[0]
