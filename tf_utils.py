@@ -1,9 +1,12 @@
+import os
 from os import path as osp
 import other_utils as ou
 import tensorflow as tf
 from easydict import EasyDict as edict
 import time
 import numpy as np
+#for reading summary files
+from tensorflow.python.summary import event_accumulator as ea
 
 ##
 #Get weights
@@ -82,8 +85,7 @@ def accuracy(scores, labels, name='accuracy'):
       range [0, NUM_CLASSES).
 
   Returns:
-    A scalar int32 tensor with the number of examples (out of batch_size)
-    that were predicted correctly.
+   accuracy
   Taken from TF tutorials
   """
   # For a classifier model, we can use the in_top_k Op.
@@ -93,7 +95,7 @@ def accuracy(scores, labels, name='accuracy'):
   labels = tf.to_int64(labels)
   correct = tf.nn.in_top_k(scores, labels, 1)
   # Return the number of true entries.
-  return tf.reduce_mean(tf.cast(correct, tf.int32), name=name)
+  return tf.reduce_mean(tf.cast(correct, tf.float32), name=name)
 
 
 ##
@@ -143,6 +145,10 @@ class TFNet(object):
     ou.mkdir(self.logDir_)
     ou.mkdir(self.modelDir_) 
     self.summaryWriter_  = None
+
+  def get_log_name(self):
+    fNames = [osp.join(self.logDir_, f) for f in  os.listdir(self.logDir_)]
+    return fNames
 
   def get_weights(self, scopeName, shape, stddev=0.005, wd=None):
     '''
@@ -264,15 +270,115 @@ class TFNet(object):
 
 
 ##
-#Helper class for easily training TFNets
-class TFTrain(object):
-  def __init__(self, ipVar, tfNet, solverType='adam', initLr=1e-3, 
-        maxIter=100000, dispIter=1000, logIter=1000, batchSz=128):
+#Read the summary file
+class TFSummary(object):
+  def __init__(self, fName):
+    self.events_ = ea.EventAccumulator(fName)
+    #Load all the data
+    self.events_.Reload() 
+    #All tags
+    self.tags_ = self.events_.Tags()
+
+  def _read_value(self, tag):
+    '''
+      tag: the variable name whose value is to be extracted
+    '''
+    isFound = False
+    for k in self.tags_.keys():
+      if tag in self.tags_[k]:
+        isFound = True
+        break
+    if isFound is False:
+      print ('Tag Name %s NOT FOUND' % tag)
+    if k == 'scalars':
+      vals = self.events_.Scalars(tag)
+    elif k == 'histogram':
+      vals = self.events_.Histograms(tag)
+    else:
+      raise Exception ('Only histogram and scalar summaries can be loaded for now')
+    return vals
+
+  def get_value(self, tag, lastK=1):
+    '''
+      tag: the variable name whose value is to be extracted
+      lastK: how many value to extract starting from the end
+    '''
+    valList = self._read_value(tag)
+    valList = valList[-lastK  :]
+    vals    = [v.value for v in valList]
+    return vals
+     
+  def get_value_and_steps(self, tag):
+    valList = self._read_value(tag)
+    vals    = [v.value for v in valList]
+    steps   = [int(v.step) for v in valList]
+    return vals, steps
+
+##
+#Main TF Helper class
+class TFMain(object):
+  def __init__(self, ipVar, tfNet):
     #input variables
     assert type(ipVar) is list
     self.ips_ = ipVar
     #net to be trained
     self.tfNet_    = tfNet
+    #Summary logger object
+    self.log_ = None
+
+  ##
+  #add the training accuracy/loss measure
+  def add_loss_summaries(self, lossOps, lossNames=None):
+    '''
+     lossOps: the operator that stores which accuracies/losses
+             need to logged 
+    '''
+    if not type(lossOps) == list:
+      lossOps   = [lossOps]
+    if lossNames is None:
+      lossNames = ['%s' % l.name for l in lossOps]
+    self.lossSmmry_ = edict()
+    self.lossNames_ = edict()
+    self.lossSmmry_['train'] = []
+    self.lossSmmry_['val']   = []
+    self.lossNames_['train'] = []
+    self.lossNames_['val']   = []
+    for l, n in zip(lossOps, lossNames):
+      for tv in ['train', 'val']:
+        #Train/Val summaries should not be merged with the other summaries
+        name = '%s_%s' % (tv, n)
+        self.lossNames_[tv].append(name)
+        self.lossSmmry_[tv].append(tf.scalar_summary(name, l))
+    self.lossOps_ = lossOps 
+
+  def fetch_loss_values(self, setName=None, lastK=1):
+    '''
+      Returns the averaged loss values from lastK logging iters
+    '''
+    if setName is None:
+      setName = ['train', 'val']
+    else:
+      assert setName in ['train', 'val']
+      setName = [setName]
+    #If logger is none
+    if self.log_ is None:
+      fName = self.tfNet_.get_log_name()
+      assert len(fName) == 1, 'More than one log files found'
+      self.log_ = TFSummary(fName[0])
+    #Get the results
+    res = edict()
+    for s in setName:
+      res[s] = edict()
+      for ln in self.lossNames_[s]:
+        res[s][ln] = self.log_.get_value(ln, lastK=lastK)
+    return res
+
+##
+#Helper class for easily training TFNets
+class TFTrain(TFMain):
+  def __init__(self, ipVar, tfNet, solverType='adam', initLr=1e-3, 
+        maxIter=100000, dispIter=1000, logIter=1000, batchSz=128):
+    TFMain.__init__(self, ipVar, tfNet)
     self.maxIter_  = maxIter
     self.dispIter_ = dispIter 
     self.logIter_  = logIter
@@ -306,31 +412,6 @@ class TFTrain(object):
   #
   def reset_train_time(self):
     self.trTime_ = 0
-
-  ##
-  #add the training accuracy/loss measure
-  def add_loss_summaries(self, lossOps, lossNames=None):
-    '''
-     lossOps: the operator that stores which accuracies/losses
-             need to logged 
-    '''
-    if not type(lossOps) == list:
-      lossOps   = [lossOps]
-    if lossNames is None:
-      lossNames = ['%s' % l.name for l in lossOps]
-    self.lossSmmry_ = edict()
-    self.lossNames_ = edict()
-    self.lossSmmry_['train'] = []
-    self.lossSmmry_['val']   = []
-    self.lossNames_['train'] = []
-    self.lossNames_['val']   = []
-    for l, n in zip(lossOps, lossNames):
-      for tv in ['train', 'val']:
-        #Train/Val summaries should not be merged with the other summaries
-        name = '%s_%s' % (tv, n)
-        self.lossNames_[tv].append(name)
-        self.lossSmmry_[tv].append(tf.scalar_summary(name, l))
-    self.lossOps_ = lossOps 
 
   ##
   #step the network by 1
