@@ -52,6 +52,51 @@ def l2_loss(err, name=None):
     pass
 
 ##
+#softmax_loss
+def softmax_loss(scores, labels, name='softmax_loss'):
+  """Calculates the loss from the logits and the labels.
+
+  Args:
+    score: Scores tensor, float - [batch_size, NUM_CLASSES].
+             NOTE: LOGITS SHOULD NOT BE NORMALIZED BY SOFTMAX BEFORE
+    labels: Labels tensor, int32 - [batch_size].
+
+  Returns:
+    loss: Loss tensor of type float.
+  Taken from TF tutorials
+  """
+  labels = tf.to_int64(labels)
+  cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
+      scores, labels, name=name)
+  loss = tf.reduce_mean(cross_entropy, name=name)
+  return loss
+
+##
+#accuracy
+def accuracy(scores, labels, name='accuracy'):
+  """Evaluate the quality of the scores at predicting the label.
+
+  Args:
+    scores: Logits tensor, float - [batch_size, NUM_CLASSES].
+    labels: Labels tensor, int32 - [batch_size], with values in the
+      range [0, NUM_CLASSES).
+
+  Returns:
+    A scalar int32 tensor with the number of examples (out of batch_size)
+    that were predicted correctly.
+  Taken from TF tutorials
+  """
+  # For a classifier model, we can use the in_top_k Op.
+  # It returns a bool tensor with shape [batch_size] that is true for
+  # the examples where the label is in the top k (here k=1)
+  # of all logits for that example.
+  labels = tf.to_int64(labels)
+  correct = tf.nn.in_top_k(scores, labels, 1)
+  # Return the number of true entries.
+  return tf.reduce_mean(tf.cast(correct, tf.int32), name=name)
+
+
+##
 #Apply batch norm to a layer
 def apply_batch_norm( x, scopeName, movingAvgFraction=0.999,
        scale=False, phase='train'):
@@ -153,7 +198,10 @@ class TFNet(object):
     return conv
 
   def add_to_losses(self, loss):
-    tf.add_to_collection(self.lossCollection_, loss) 
+    if not type(loss) is list:
+      loss = [loss]
+    for l in loss:
+      tf.add_to_collection(self.lossCollection_, l) 
 
   def get_loss_collection(self):
     return tf.get_collection(self.lossCollection_)
@@ -269,7 +317,7 @@ class TFTrain(object):
     if not type(lossOps) == list:
       lossOps   = [lossOps]
     if lossNames is None:
-      lossNames = ['smmry_%s' % l.name for l in lossOps]
+      lossNames = ['%s' % l.name for l in lossOps]
     self.lossSmmry_ = edict()
     self.lossNames_ = edict()
     self.lossSmmry_['train'] = []
@@ -298,6 +346,7 @@ class TFTrain(object):
       ops = ops[1:]
     else:
       ops = sess.run([self.loss_] +  evalOps, feed_dict=feed_dict)
+    #print ('Time for 1 iter: ', time.time() - tSt)
     self.trTime_ += (time.time() - tSt)
     return ops
   
