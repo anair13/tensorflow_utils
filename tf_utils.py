@@ -50,6 +50,26 @@ def l1_loss(tensor, weight=1.0, scope=None):
     return loss 
 
 ##
+#Log L1 loss
+def log_l1_loss(tensor, weight=1.0, scope=None):
+  """Define a L1Loss, useful for regularize, i.e. lasso.
+  Args:
+    tensor: tensor to regularize.
+    weight: scale the loss by this factor.
+    scope: Optional scope for op_scope.
+  Returns:
+    the L1 loss op.
+  """
+  with tf.op_scope([tensor], scope, 'LogL1Loss'):
+    weight = tf.convert_to_tensor(weight,
+                                  dtype=tensor.dtype.base_dtype,
+                                  name='loss_weight')
+    absLog  = tf.log(tf.abs(tensor) + 1)
+    logLoss = tf.mul(weight, tf.reduce_sum(absLog),
+               name='value')
+    return logLoss 
+
+##
 #Not implemented
 def l2_loss(err, name=None):
   with tf.scope('L2Loss') as scope:
@@ -313,7 +333,7 @@ class TFSummary(object):
     valList = self._read_value(tag)
     valList = valList[-lastK  :]
     vals    = [v.value for v in valList]
-    return vals
+    return np.mean(vals)
      
   def get_value_and_steps(self, tag):
     valList = self._read_value(tag)
