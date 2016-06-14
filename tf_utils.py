@@ -1,6 +1,3 @@
-"""Package from https://github.com/pulkitag/tensorflow_utils
-but with minor adjustments from me"""
-
 import os
 from os import path as osp
 import other_utils as ou
@@ -158,8 +155,8 @@ def apply_batch_norm( x, scopeName, movingAvgFraction=0.999,
 ##
 #Helper class for constructing networks
 class TFNet(object):
-  def __init__(self, modelName=None, logDir='../tf_logs/',
-          modelDir='../tf_models/', outputDir='../tf_outputs/'):
+  def __init__(self, modelName=None, logDir='tf_logs/',
+          modelDir='tf_models/', outputDir='tf_outputs/'):
     self.g_ = tf.Graph()
     self.lossCollection_ = 'losses'
     self.modelName_      = modelName
@@ -531,7 +528,6 @@ class TFTrain(TFMain):
           self.tfNet_.save_summary(res[N+1:], sess, i)
           self.print_display_str(i, self.lossNames_['val'], valLosses, False)   
 
-          # For the spell RNN: output some validation example to text file
           if dump_to_output:
             dump_to_output(sess, output_file, i)
 
