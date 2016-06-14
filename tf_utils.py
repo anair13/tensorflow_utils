@@ -1,3 +1,6 @@
+"""Package from https://github.com/pulkitag/tensorflow_utils
+but with minor adjustments from me"""
+
 import os
 from os import path as osp
 import other_utils as ou
@@ -8,6 +11,8 @@ import numpy as np
 import subprocess
 #for reading summary files
 from tensorflow.python.summary import event_accumulator as ea
+import data
+import collections
 
 ##
 #Get weights
@@ -153,18 +158,20 @@ def apply_batch_norm( x, scopeName, movingAvgFraction=0.999,
 ##
 #Helper class for constructing networks
 class TFNet(object):
-  def __init__(self, modelName=None, logDir='tf_logs/',
-          modelDir='tf_models/'):
+  def __init__(self, modelName=None, logDir='../tf_logs/',
+          modelDir='../tf_models/', outputDir='../tf_outputs/'):
     self.g_ = tf.Graph()
     self.lossCollection_ = 'losses'
     self.modelName_      = modelName
     self.logDir_         = logDir
     self.modelDir_       = modelDir
+    self.outputDir_      = outputDir
     if modelName is not None:
       self.logDir_   = osp.join(self.logDir_, modelName)
       self.modelDir_ = osp.join(self.modelDir_, modelName)
     ou.mkdir(self.logDir_)
     ou.mkdir(self.modelDir_) 
+    ou.mkdir(self.outputDir_) 
     self.summaryWriter_  = None
 
   def get_log_name(self):
@@ -172,10 +179,10 @@ class TFNet(object):
     return fNames
 
   def clear_old_logs(self):
-   fNames = self.get_log_name()
-   for f in fNames:
-    print ('Deleting: %s' % f)
-    subprocess.check_call(['rm %s' % f], shell=True) 
+    fNames = self.get_log_name()
+    for f in fNames:
+      print ('Deleting: %s' % f)
+      subprocess.check_call(['rm %s' % f], shell=True) 
 
   def get_weights(self, scopeName, shape, stddev=0.005, wd=None):
     '''
@@ -291,10 +298,14 @@ class TFNet(object):
 
   #save the model
   def save_model(self, sess, step):
-    svPath = osp.join(self.modelDir_, 'model') 
+    svPath = osp.join(self.modelDir_, 'model')
     ou.mkdir(svPath) 
     self.saver_.save(sess, svPath, global_step=step)
 
+  def restore_model(self, sess, step):
+    svPath = osp.join(self.modelDir_, 'model' + '-' + str(step))
+    self.saver_.restore(sess, svPath)
+    return svPath
 
 ##
 #Read the summary file
@@ -312,7 +323,8 @@ class TFSummary(object):
     '''
     isFound = False
     for k in self.tags_.keys():
-      if tag in self.tags_[k]:
+      elements = self.tags_[k]
+      if isinstance(elements, collections.Iterable) and tag in elements:
         isFound = True
         break
     if isFound is False:
@@ -473,21 +485,30 @@ class TFTrain(TFMain):
  
   ##
   #train the net 
-  def train(self, train_data_fn, val_data_fn, trainArgs=[], valArgs=[]):
+  def train(self, train_data_fn, val_data_fn, trainArgs=[], valArgs=[], gpu_fraction=1.0, dump_to_output=None):
     '''
       train_data_fn: returns feed_dict for train data
       val_data_fn  : returns feed_dict for val data
     '''
+    gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=gpu_fraction)
+    config = tf.ConfigProto(gpu_options=gpu_options)
+
+    output_file = open(self.tfNet_.outputDir_ + "/outputs.txt", "w+")
+    training_file = open(self.tfNet_.outputDir_ + "/training.txt", "w+")
+    
+    #with tf.Session(config=config) as sess:
     with tf.Session() as sess:
       sess.run(tf.initialize_all_variables())
       self.reset_train_time()
       
       #Start the iterations
-      for i in range(self.maxIter_):
+      for i in range(self.maxIter_ + 1):
         #Fetch the training data
         trainDat = train_data_fn(self.ips_, self.batchSz_, True, *trainArgs)
+        training_file.write(str(i)+"\n")
+        training_file.flush()
 
-        if np.mod(i, self.logIter_)==0:
+        if np.mod(i, self.logIter_) == 0:
           #evaluate the training losses and summaries
           N       = len(self.lossOps_)
           evalOps = self.lossOps_ + self.lossSmmry_['train'] + [self.tfNet_.summaryOp_]
@@ -508,9 +529,19 @@ class TFTrain(TFMain):
           valLosses = res[1:N+1]          
           #Save the val summaries
           self.tfNet_.save_summary(res[N+1:], sess, i)
-          self.print_display_str(i, self.lossNames_['val'], valLosses, False)     
+          self.print_display_str(i, self.lossNames_['val'], valLosses, False)   
+
+          # For the spell RNN: output some validation example to text file
+          if dump_to_output:
+            dump_to_output(sess, output_file, i)
+
         else: 
-          ops    = self.step_by_1(sess, trainDat)
+          ops    = self.step_by_1(sess, trainDat, evalOps = self.lossSmmry_['train'])
           ovLoss = ops[0]
+          N      = len(self.lossOps_)
+          self.tfNet_.save_summary(ops[1:N+1], sess, i)
         assert not np.isnan(ovLoss), 'Model diverged, NaN loss'
         assert not np.isinf(ovLoss), 'Model diverged, inf loss'
+
+      output_file.close()
+      training_file.close()
