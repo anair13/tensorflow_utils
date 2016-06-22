@@ -167,6 +167,7 @@ class TFNet(object):
     if modelName is not None:
       self.logDir_   = osp.join(self.logDir_, modelName)
       self.modelDir_ = osp.join(self.modelDir_, modelName)
+      self.outputDir_ = osp.join(self.outputDir_, modelName)
     ou.mkdir(self.logDir_)
     ou.mkdir(self.modelDir_) 
     ou.mkdir(self.outputDir_) 
