@@ -1,3 +1,5 @@
+"""Tensorflow utilities for loading and training networks"""
+
 import os
 from os import path as osp
 import other_utils as ou
@@ -8,7 +10,6 @@ import numpy as np
 import subprocess
 #for reading summary files
 from tensorflow.python.summary import event_accumulator as ea
-import data
 import collections
 
 ##
@@ -169,6 +170,12 @@ class TFNet(object):
     ou.mkdir(self.logDir_)
     ou.mkdir(self.modelDir_) 
     ou.mkdir(self.outputDir_) 
+
+    print "View outputs with:"
+    print "tail -F " + self.outputDir_+ "/"
+    print "Launch tensorboard for this network:"
+    print "tensorboard --logdir " + self.logDir_
+
     self.summaryWriter_  = None
 
   def get_log_name(self):
@@ -299,10 +306,15 @@ class TFNet(object):
     ou.mkdir(svPath) 
     self.saver_.save(sess, svPath, global_step=step)
 
-  def restore_model(self, sess, step):
-    svPath = osp.join(self.modelDir_, 'model' + '-' + str(step))
-    self.saver_.restore(sess, svPath)
-    return svPath
+  def restore_model(self, sess):
+    ckpt = tf.train.get_checkpoint_state(self.modelDir_)
+    if ckpt and ckpt.model_checkpoint_path:
+      print "Checkpoint found and restored:", ckpt.model_checkpoint_path
+      self.saver_.restore(sess, ckpt.model_checkpoint_path)
+      return ckpt.model_checkpoint_path
+    else:
+      print "No checkpoint found. Initializing from scratch."
+      return None
 
 ##
 #Read the summary file
@@ -413,24 +425,26 @@ class TFMain(object):
 #Helper class for easily training TFNets
 class TFTrain(TFMain):
   def __init__(self, ipVar, tfNet, solverType='adam', initLr=1e-3, 
-        maxIter=100000, dispIter=1000, logIter=1000, batchSz=128):
+        maxIter=100000, dispIter=1000, logIter=100, saveIter=5000, batchSz=128):
     TFMain.__init__(self, ipVar, tfNet)
     self.maxIter_  = maxIter
-    self.dispIter_ = dispIter 
+    self.dispIter_ = dispIter
     self.logIter_  = logIter
+    self.saveIter_ = saveIter
     self.batchSz_  = batchSz
  
     #initialize the step
     self.iter_  = tf.Variable(0, name='iteration')
   
+    #the loss to be optimized
+    self.loss_  = tfNet.get_total_loss()
+
     #define the solver
     if solverType == 'adam':
       self.opt_ = tf.train.AdamOptimizer(initLr)
+      # self.opt_ = tf.contrib.layers.optimize_loss(self.loss_, self.iter_, initLr, 'Adam', clip_gradients=10.0)
     else:
       raise Exception('Solver not recognized')
-  
-    #the loss to be optimized
-    self.loss_  = tfNet.get_total_loss()
 
     #gradient computation
     self.grads_ = self.opt_.compute_gradients(self.loss_)
@@ -490,20 +504,24 @@ class TFTrain(TFMain):
     gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=gpu_fraction)
     config = tf.ConfigProto(gpu_options=gpu_options)
 
-    output_file = open(self.tfNet_.outputDir_ + "/outputs.txt", "w+")
-    training_file = open(self.tfNet_.outputDir_ + "/training.txt", "w+")
+    output_file = open(self.tfNet_.outputDir_ + "/outputs.txt", "a")
+    training_file = open(self.tfNet_.outputDir_ + "/training.txt", "a")
     
     #with tf.Session(config=config) as sess:
     with tf.Session() as sess:
       sess.run(tf.initialize_all_variables())
       self.reset_train_time()
+      self.tfNet_.restore_model(sess)
+      start = self.iter_.eval()
+      print "Starting at iteration", start
       
       #Start the iterations
-      for i in range(self.maxIter_ + 1):
+      for i in range(start, self.maxIter_ + 1):
         #Fetch the training data
         trainDat = train_data_fn(self.ips_, self.batchSz_, True, *trainArgs)
         training_file.write(str(i)+"\n")
         training_file.flush()
+        self.iter_.assign(i).eval()
 
         if np.mod(i, self.logIter_) == 0:
           #evaluate the training losses and summaries
@@ -511,33 +529,62 @@ class TFTrain(TFMain):
           evalOps = self.lossOps_ + self.lossSmmry_['train'] + [self.tfNet_.summaryOp_]
           res     = self.step_by_1(sess, trainDat, evalOps = evalOps)
           ovLoss   = res[0]
-          trainLosses = res[1:N+1]          
-          #Save the summaries
-          self.tfNet_.save_summary(res[N+1:], sess, i)
-          #snapshot the model
-          self.tfNet_.save_model(sess, i)
-          self.print_display_str(i, self.lossNames_['train'], trainLosses)     
+          trainLosses = res[1:N+1]   
+
  
           #evaluate the validation losses and summaries 
           valDat  = val_data_fn(self.ips_, self.batchSz_, False, *valArgs)
           evalOps = self.lossOps_ + self.lossSmmry_['val']
           res     = self.step_by_1(sess, valDat, evalOps = evalOps, isTrain=False)
           ovValLoss = res[0]
-          valLosses = res[1:N+1]          
+          valLosses = res[1:N+1] 
+
           #Save the val summaries
           self.tfNet_.save_summary(res[N+1:], sess, i)
-          self.print_display_str(i, self.lossNames_['val'], valLosses, False)   
+          
+          if np.mod(i, self.dispIter_) == 0:
+            self.print_display_str(i, self.lossNames_['train'], trainLosses) 
+            self.print_display_str(i, self.lossNames_['val'], valLosses, False)   
 
+          # For the spell RNN: output some validation example to text file
           if dump_to_output:
             dump_to_output(sess, output_file, i)
 
-        else: 
+        else:
           ops    = self.step_by_1(sess, trainDat, evalOps = self.lossSmmry_['train'])
           ovLoss = ops[0]
           N      = len(self.lossOps_)
           self.tfNet_.save_summary(ops[1:N+1], sess, i)
+
+        if np.mod(i, self.saveIter_) == 0:
+          # snapshot the model
+          self.tfNet_.save_model(sess, i) 
+        
         assert not np.isnan(ovLoss), 'Model diverged, NaN loss'
         assert not np.isinf(ovLoss), 'Model diverged, inf loss'
 
       output_file.close()
       training_file.close()
+
+class TFExp(object):
+    def __init__(self, dPrms, nPrms, sPrms):
+        #Data parameters
+        self.dPrms_ = dPrms
+
+        #Net parameters
+        self.nPrms_ = nPrms
+
+        #Solver parameters
+        self.sPrms_ = sPrms
+ 
+    def get_hash_name(self):
+        d = dict_to_string(self.dPrms_)
+        n = dict_to_string(self.nPrms_)
+        s = dict_to_string(self.sPrms_)
+        return d + "_" + n + "_" + s               
+
+def dict_to_string(params):
+    name = ""
+    for key in params:
+        name = name + str(key) + "_" + str(params[key]) + "_"
+    return name[:-1]
