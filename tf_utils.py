@@ -448,7 +448,12 @@ class TFTrain(TFMain):
       raise Exception('Solver not recognized')
 
     #gradient computation
-    self.grads_ = self.opt_.compute_gradients(self.loss_)
+    grads = self.opt_.compute_gradients(self.loss_)
+    self.grads_ = []
+    for grad, var in grads:
+      if grad is not None:
+        self.grads_.append((tf.clip_by_norm(grad, 10.0), var))
+    # self.grads_ = self.opt_.compute_gradients(self.loss_)
     apply_gradient_op = self.opt_.apply_gradients(self.grads_, global_step=self.iter_)
     with tf.control_dependencies([apply_gradient_op]):
       self.train_op_ = tf.no_op(name='train')
@@ -457,12 +462,16 @@ class TFTrain(TFMain):
     tfNet.init_logging(self.grads_)
     
     #keep track of time in training the net
-    self.trTime_ = 0
+    self.resetTime_ = time.time() # tracks time reset-to-reset
+    self.trTime_ = 0 # time spent in training iterations
+    self.T3 = 0
 
   ##
   #
   def reset_train_time(self):
+    self.resetTime_ = time.time()
     self.trTime_ = 0
+    self.T3 = 0
 
   ##
   #step the network by 1
@@ -487,9 +496,11 @@ class TFTrain(TFMain):
       losses = [losses]
       lossNames = [lossNames]
     if isTrain:
-      T = self.trTime_
+      T1 = time.time() - self.resetTime_
+      T2 = self.trTime_
+      T3 = self.T3
       self.reset_train_time()
-      lossStr = 'Iter: %d, time for %d iters: %f \n ' % (step, self.dispIter_, T)
+      lossStr = 'Iter: %d, time for %d iters: (total) %f (training) %f (timer) %f \n ' % (step, self.dispIter_, T1, T2, T3)
     else:
       lossStr = ''
     lossStr = lossStr + ''.join('%s: %.3f\t' % (n, l) for n,l in zip(lossNames, losses))
@@ -522,7 +533,7 @@ class TFTrain(TFMain):
         trainDat = train_data_fn(self.ips_, self.batchSz_, True, *trainArgs)
         training_file.write(str(i)+"\n")
         training_file.flush()
-        self.iter_.assign(i).eval()
+        self.iter_.assign(i)
 
         if np.mod(i, self.logIter_) == 0:
           #evaluate the training losses and summaries
@@ -532,7 +543,6 @@ class TFTrain(TFMain):
           ovLoss   = res[0]
           trainLosses = res[1:N+1]   
 
- 
           #evaluate the validation losses and summaries 
           valDat  = val_data_fn(self.ips_, self.batchSz_, False, *valArgs)
           evalOps = self.lossOps_ + self.lossSmmry_['val']
