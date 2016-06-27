@@ -508,7 +508,7 @@ class TFTrain(TFMain):
  
   ##
   #train the net 
-  def train(self, train_data_fn, val_data_fn, trainArgs=[], valArgs=[], gpu_fraction=1.0, dump_to_output=None):
+  def train(self, train_data_fn, val_data_fn, trainArgs=[], valArgs=[], use_existing=False, gpu_fraction=1.0, dump_to_output=None):
     '''
       train_data_fn: returns feed_dict for train data
       val_data_fn  : returns feed_dict for val data
@@ -523,7 +523,10 @@ class TFTrain(TFMain):
     with tf.Session() as sess:
       sess.run(tf.initialize_all_variables())
       self.reset_train_time()
-      self.tfNet_.restore_model(sess)
+
+      if use_existing: # use existing saved models
+        self.tfNet_.restore_model(sess)
+      
       start = self.iter_.eval()
       print "Starting at iteration", start
       
