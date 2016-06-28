@@ -519,8 +519,8 @@ class TFTrain(TFMain):
     output_file = open(self.tfNet_.outputDir_ + "/outputs.txt", "a")
     training_file = open(self.tfNet_.outputDir_ + "/training.txt", "a")
     
-    #with tf.Session(config=config) as sess:
-    with tf.Session() as sess:
+    with tf.Session(config=config) as sess:
+    #with tf.Session() as sess:
       sess.run(tf.initialize_all_variables())
       self.reset_train_time()
 
